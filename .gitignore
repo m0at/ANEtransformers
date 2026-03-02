@@ -1,0 +1,33 @@
+# Compiled binaries (no extension)
+train
+train_large
+bench_fused
+gpt2
+inmem_basic
+inmem_peak
+training/train
+training/train_large
+training/bench_fused
+training/gpt2
+# Test binaries (compiled, no extension)
+training/test_chaining
+training/test_decode_attn
+training/test_ffn_seq1
+training/test_lm_head_ane
+training/test_lm_head_fast
+training/test_lm_head_neon
+training/test_multi_input
+training/test_ane_advanced
+training/test_perf_stats
+training/test_qos_sweep
+training/test_weight_reload
+
+# Weight files (download with gpt2_convert.py)
+training/gpt2_weights/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
