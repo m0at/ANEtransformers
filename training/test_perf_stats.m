@@ -15,7 +15,6 @@ static void dump_class(const char *name) {
     if (!cls) { printf("  %s: NOT FOUND\n", name); return; }
     printf("\n=== %s ===\n", name);
 
-    // Class methods
     unsigned int count;
     Method *methods = class_copyMethodList(object_getClass(cls), &count);
     if (count) printf("  Class methods:\n");
@@ -26,7 +25,6 @@ static void dump_class(const char *name) {
     }
     free(methods);
 
-    // Instance methods
     methods = class_copyMethodList(cls, &count);
     if (count) printf("  Instance methods:\n");
     for (unsigned int i = 0; i < count; i++) {
@@ -36,7 +34,6 @@ static void dump_class(const char *name) {
     }
     free(methods);
 
-    // Properties
     unsigned int pcount;
     objc_property_t *props = class_copyPropertyList(cls, &pcount);
     if (pcount) printf("  Properties:\n");
@@ -46,17 +43,6 @@ static void dump_class(const char *name) {
         printf("    @property %s  [%s]\n", pname, pattr ? pattr : "?");
     }
     free(props);
-
-    // Protocols
-    unsigned int prcount;
-    Protocol * __unsafe_unretained *protos = class_copyProtocolList(cls, &prcount);
-    if (prcount) {
-        printf("  Protocols:");
-        for (unsigned int i = 0; i < prcount; i++)
-            printf(" %s", protocol_getName(protos[i]));
-        printf("\n");
-    }
-    free(protos);
 }
 
 static IOSurfaceRef make_surface(size_t bytes) {
@@ -74,7 +60,6 @@ int main() {
 
         printf("=== ANE Performance Stats Probe ===\n");
 
-        // Dump all ANE-related classes
         dump_class("_ANEPerformanceStats");
         dump_class("_ANEPerfRequest");
         dump_class("ANEPerfRequest");
@@ -92,13 +77,10 @@ int main() {
         printf("\n=== Instantiation Tests ===\n");
         Class perfClass = NSClassFromString(@"_ANEPerformanceStats");
         if (perfClass) {
-            // Try alloc/init
             @try {
                 id perfStats = [[perfClass alloc] init];
                 printf("_ANEPerformanceStats alloc/init: %s\n",
                        perfStats ? [[perfStats description] UTF8String] : "nil");
-
-                // Try to read all properties via KVC
                 if (perfStats) {
                     unsigned int pcount;
                     objc_property_t *props = class_copyPropertyList(perfClass, &pcount);
@@ -118,23 +100,23 @@ int main() {
             }
         }
 
-        // === Compile a simple kernel and try passing perfStats to request ===
+        // Compile a working kernel and test perfStats in request
         printf("\n=== Compile kernel and test perfStats in request ===\n");
         Class g_D  = NSClassFromString(@"_ANEInMemoryModelDescriptor");
         Class g_I  = NSClassFromString(@"_ANEInMemoryModel");
         Class g_AR = NSClassFromString(@"_ANERequest");
         Class g_AIO= NSClassFromString(@"_ANEIOSurfaceObject");
 
-        int IC = 4, OC = 4, SP = 4;
-        _Float16 weights[16];
-        for (int i = 0; i < 16; i++) weights[i] = (i/4 == i%4) ? (_Float16)1.0f : (_Float16)0.0f;
-
-        int ws = 16*2, tot = 128+ws;
+        int CH = 64, SP = 32;
+        _Float16 *w = (_Float16*)calloc(CH*CH, sizeof(_Float16));
+        for (int i = 0; i < CH; i++) w[i*CH+i] = (_Float16)1.0f;
+        int ws = CH*CH*2, tot = 128+ws;
         uint8_t *blob = (uint8_t*)calloc(tot,1);
         blob[0]=1; blob[4]=2; blob[64]=0xEF; blob[65]=0xBE; blob[66]=0xAD; blob[67]=0xDE; blob[68]=1;
         *(uint32_t*)(blob+72)=ws; *(uint32_t*)(blob+80)=128;
-        memcpy(blob+128, weights, ws);
+        memcpy(blob+128, w, ws);
         NSData *wdata = [NSData dataWithBytesNoCopy:blob length:tot freeWhenDone:YES];
+        free(w);
 
         NSString *mil = [NSString stringWithFormat:
             @"program(1.3)\n"
@@ -142,18 +124,22 @@ int main() {
             "{\"coremlc-version\", \"3505.4.1\"}, {\"coremltools-component-milinternal\", \"\"}, "
             "{\"coremltools-version\", \"9.0\"}})]\n"
             "{\n"
-            "    func main<ios18>(tensor<fp16, [1, %d, 1, %d]> x) {\n"
+            "    func main<ios18>(tensor<fp32, [1, %d, 1, %d]> x) {\n"
             "        string pt = const()[name=string(\"pt\"), val=string(\"valid\")];\n"
             "        tensor<int32, [2]> st = const()[name=string(\"st\"), val=tensor<int32, [2]>([1,1])];\n"
             "        tensor<int32, [4]> pd = const()[name=string(\"pd\"), val=tensor<int32, [4]>([0,0,0,0])];\n"
             "        tensor<int32, [2]> dl = const()[name=string(\"dl\"), val=tensor<int32, [2]>([1,1])];\n"
             "        int32 gr = const()[name=string(\"gr\"), val=int32(1)];\n"
+            "        string to16 = const()[name=string(\"to16\"), val=string(\"fp16\")];\n"
+            "        tensor<fp16, [1,%d,1,%d]> x16 = cast(dtype=to16,x=x)[name=string(\"cin\")];\n"
             "        tensor<fp16, [%d,%d,1,1]> W = const()[name=string(\"W\"), "
             "val=tensor<fp16, [%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/weight.bin\"), offset=uint64(64)))];\n"
-            "        tensor<fp16, [1,%d,1,%d]> y = conv(dilations=dl,groups=gr,pad=pd,pad_type=pt,strides=st,weight=W,x=x)"
+            "        tensor<fp16, [1,%d,1,%d]> y16 = conv(dilations=dl,groups=gr,pad=pd,pad_type=pt,strides=st,weight=W,x=x16)"
             "[name=string(\"conv\")];\n"
+            "        string to32 = const()[name=string(\"to32\"), val=string(\"fp32\")];\n"
+            "        tensor<fp32, [1,%d,1,%d]> y = cast(dtype=to32,x=y16)[name=string(\"cout\")];\n"
             "    } -> (y);\n"
-            "}\n", IC, SP, OC, IC, OC, IC, OC, SP];
+            "}\n", CH, SP, CH, SP, CH, CH, CH, CH, CH, SP, CH, SP];
 
         NSData *md = [mil dataUsingEncoding:NSUTF8StringEncoding];
         id desc = ((id(*)(Class,SEL,id,id,id))objc_msgSend)(g_D, @selector(modelWithMILText:weights:optionsPlist:),
@@ -170,8 +156,9 @@ int main() {
         ((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(mdl, @selector(compileWithQoS:options:error:), 21, @{}, &e);
         ((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(mdl, @selector(loadWithQoS:options:error:), 21, @{}, &e);
 
-        IOSurfaceRef ioIn = make_surface(IC*SP*2);
-        IOSurfaceRef ioOut = make_surface(OC*SP*2);
+        int ioBytes = CH * SP * 4; // fp32
+        IOSurfaceRef ioIn = make_surface(ioBytes);
+        IOSurfaceRef ioOut = make_surface(ioBytes);
         id wI = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(g_AIO, @selector(objectWithIOSurface:), ioIn);
         id wO = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(g_AIO, @selector(objectWithIOSurface:), ioOut);
 
@@ -186,20 +173,17 @@ int main() {
             printf("  Request: %s\n", req ? "created" : "nil");
 
             if (req) {
-                // Write input
                 IOSurfaceLock(ioIn, 0, NULL);
-                _Float16 *inp = (_Float16*)IOSurfaceGetBaseAddress(ioIn);
-                for (int i = 0; i < IC*SP; i++) inp[i] = (_Float16)1.0f;
+                float *inp = (float*)IOSurfaceGetBaseAddress(ioIn);
+                for (int i = 0; i < CH*SP; i++) inp[i] = 1.0f;
                 IOSurfaceUnlock(ioIn, 0, NULL);
 
-                // Eval
                 BOOL ok = ((BOOL(*)(id,SEL,unsigned int,id,id,NSError**))objc_msgSend)(
                     mdl, @selector(evaluateWithQoS:options:request:error:), 21, @{}, req, &e);
                 printf("  Eval: %s\n", ok ? "OK" : [[e description] UTF8String]);
 
-                // Read perfStats after eval
                 if (ok && perfStats) {
-                    printf("  PerfStats after eval:\n");
+                    printf("\n  PerfStats after 1 eval:\n");
                     unsigned int pcount;
                     objc_property_t *props = class_copyPropertyList(perfClass, &pcount);
                     for (unsigned int i = 0; i < pcount; i++) {
@@ -213,13 +197,16 @@ int main() {
                     }
                     free(props);
 
-                    // Run 100 evals and check if counters accumulate
                     printf("\n  Running 100 evals...\n");
+                    uint64_t t0 = mach_absolute_time();
                     for (int i = 0; i < 100; i++) {
                         ((BOOL(*)(id,SEL,unsigned int,id,id,NSError**))objc_msgSend)(
                             mdl, @selector(evaluateWithQoS:options:request:error:), 21, @{}, req, &e);
                     }
-                    printf("  PerfStats after 100 evals:\n");
+                    printf("  100 evals in %.1fms (%.2fms/eval)\n",
+                           tb_ms(mach_absolute_time()-t0), tb_ms(mach_absolute_time()-t0)/100.0);
+
+                    printf("\n  PerfStats after 101 evals:\n");
                     props = class_copyPropertyList(perfClass, &pcount);
                     for (unsigned int i = 0; i < pcount; i++) {
                         const char *pname = property_getName(props[i]);
@@ -233,11 +220,9 @@ int main() {
                     free(props);
                 }
             }
+        } else {
+            printf("  _ANEPerformanceStats class NOT FOUND\n");
         }
-
-        // Also probe IORegistry for ANE perf data
-        printf("\n=== IORegistry ANE info ===\n");
-        printf("  (run: ioreg -r -c H11ANEIn | head -100)\n");
 
         // Cleanup
         ((BOOL(*)(id,SEL,unsigned int,NSError**))objc_msgSend)(mdl, @selector(unloadWithQoS:error:), 21, &e);

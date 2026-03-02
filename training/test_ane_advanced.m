@@ -6,6 +6,7 @@
 #import <dlfcn.h>
 #import <IOSurface/IOSurface.h>
 #import <mach/mach_time.h>
+#include <math.h>
 
 static mach_timebase_info_data_t g_tb;
 static double tb_ms(uint64_t t) { return (double)t * g_tb.numer / g_tb.denom / 1e6; }
@@ -65,7 +66,6 @@ int main() {
         dump_class("_ANEEvent");
         dump_class("_ANEFenceEvent");
 
-        // Try instantiate
         const char *event_classes[] = {
             "_ANESharedEvents", "_ANESharedSignalEvent", "_ANESharedWaitEvent",
             "_ANEEvent", "_ANEFenceEvent", NULL
@@ -89,22 +89,21 @@ int main() {
         dump_class("_ANEMultiRequest");
         dump_class("_ANEBatchRequest");
 
-        // === Part 3: weightsBuffer parameter test ===
+        // === Part 3: Compile working kernel for weightsBuffer + procedureIndex tests ===
         printf("\n--- Part 3: weightsBuffer IOSurface test ---\n");
         Class g_D  = NSClassFromString(@"_ANEInMemoryModelDescriptor");
         Class g_I  = NSClassFromString(@"_ANEInMemoryModel");
         Class g_AR = NSClassFromString(@"_ANERequest");
         Class g_AIO= NSClassFromString(@"_ANEIOSurfaceObject");
 
-        int IC = 4, OC = 4, SP = 4;
-        _Float16 weights[16];
-        for (int i = 0; i < 16; i++) weights[i] = (i/4 == i%4) ? (_Float16)1.0f : (_Float16)0.0f;
-
-        int ws = 16*2, tot = 128+ws;
+        int CH = 64, SP = 32;
+        _Float16 *w = (_Float16*)calloc(CH*CH, sizeof(_Float16));
+        for (int i = 0; i < CH; i++) w[i*CH+i] = (_Float16)1.0f;
+        int ws = CH*CH*2, tot = 128+ws;
         uint8_t *blob = (uint8_t*)calloc(tot,1);
         blob[0]=1; blob[4]=2; blob[64]=0xEF; blob[65]=0xBE; blob[66]=0xAD; blob[67]=0xDE; blob[68]=1;
         *(uint32_t*)(blob+72)=ws; *(uint32_t*)(blob+80)=128;
-        memcpy(blob+128, weights, ws);
+        memcpy(blob+128, w, ws);
         NSData *wdata = [NSData dataWithBytesNoCopy:blob length:tot freeWhenDone:YES];
 
         NSString *mil = [NSString stringWithFormat:
@@ -113,18 +112,22 @@ int main() {
             "{\"coremlc-version\", \"3505.4.1\"}, {\"coremltools-component-milinternal\", \"\"}, "
             "{\"coremltools-version\", \"9.0\"}})]\n"
             "{\n"
-            "    func main<ios18>(tensor<fp16, [1, %d, 1, %d]> x) {\n"
+            "    func main<ios18>(tensor<fp32, [1, %d, 1, %d]> x) {\n"
             "        string pt = const()[name=string(\"pt\"), val=string(\"valid\")];\n"
             "        tensor<int32, [2]> st = const()[name=string(\"st\"), val=tensor<int32, [2]>([1,1])];\n"
             "        tensor<int32, [4]> pd = const()[name=string(\"pd\"), val=tensor<int32, [4]>([0,0,0,0])];\n"
             "        tensor<int32, [2]> dl = const()[name=string(\"dl\"), val=tensor<int32, [2]>([1,1])];\n"
             "        int32 gr = const()[name=string(\"gr\"), val=int32(1)];\n"
+            "        string to16 = const()[name=string(\"to16\"), val=string(\"fp16\")];\n"
+            "        tensor<fp16, [1,%d,1,%d]> x16 = cast(dtype=to16,x=x)[name=string(\"cin\")];\n"
             "        tensor<fp16, [%d,%d,1,1]> W = const()[name=string(\"W\"), "
             "val=tensor<fp16, [%d,%d,1,1]>(BLOBFILE(path=string(\"@model_path/weights/weight.bin\"), offset=uint64(64)))];\n"
-            "        tensor<fp16, [1,%d,1,%d]> y = conv(dilations=dl,groups=gr,pad=pd,pad_type=pt,strides=st,weight=W,x=x)"
+            "        tensor<fp16, [1,%d,1,%d]> y16 = conv(dilations=dl,groups=gr,pad=pd,pad_type=pt,strides=st,weight=W,x=x16)"
             "[name=string(\"conv\")];\n"
+            "        string to32 = const()[name=string(\"to32\"), val=string(\"fp32\")];\n"
+            "        tensor<fp32, [1,%d,1,%d]> y = cast(dtype=to32,x=y16)[name=string(\"cout\")];\n"
             "    } -> (y);\n"
-            "}\n", IC, SP, OC, IC, OC, IC, OC, SP];
+            "}\n", CH, SP, CH, SP, CH, CH, CH, CH, CH, SP, CH, SP];
 
         NSData *md = [mil dataUsingEncoding:NSUTF8StringEncoding];
         id desc = ((id(*)(Class,SEL,id,id,id))objc_msgSend)(g_D, @selector(modelWithMILText:weights:optionsPlist:),
@@ -142,16 +145,16 @@ int main() {
         ((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(mdl, @selector(compileWithQoS:options:error:), 21, @{}, &e);
         ((BOOL(*)(id,SEL,unsigned int,id,NSError**))objc_msgSend)(mdl, @selector(loadWithQoS:options:error:), 21, @{}, &e);
 
-        IOSurfaceRef ioIn = make_surface(IC*SP*2);
-        IOSurfaceRef ioOut = make_surface(OC*SP*2);
+        int ioBytes = CH * SP * 4;
+        IOSurfaceRef ioIn = make_surface(ioBytes);
+        IOSurfaceRef ioOut = make_surface(ioBytes);
 
-        // Write input
         IOSurfaceLock(ioIn, 0, NULL);
-        _Float16 *inp = (_Float16*)IOSurfaceGetBaseAddress(ioIn);
-        for (int c = 0; c < IC; c++) for (int s = 0; s < SP; s++) inp[c*SP+s] = (_Float16)(s+1.0f);
+        float *inp = (float*)IOSurfaceGetBaseAddress(ioIn);
+        for (int c = 0; c < CH; c++) for (int s = 0; s < SP; s++) inp[c*SP+s] = (float)(s+1) * 0.1f;
         IOSurfaceUnlock(ioIn, 0, NULL);
 
-        // Normal eval first (baseline)
+        // Baseline eval
         id wI = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(g_AIO, @selector(objectWithIOSurface:), ioIn);
         id wO = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(g_AIO, @selector(objectWithIOSurface:), ioOut);
         id req0 = ((id(*)(Class,SEL,id,id,id,id,id,id,id))objc_msgSend)(g_AR,
@@ -162,23 +165,22 @@ int main() {
         printf("  Baseline eval (weightsBuffer=nil, procIdx=0): %s\n", ok ? "OK" : "FAIL");
 
         IOSurfaceLock(ioOut, kIOSurfaceLockReadOnly, NULL);
-        _Float16 *out0 = (_Float16*)IOSurfaceGetBaseAddress(ioOut);
-        printf("  Output: [%.1f, %.1f, %.1f, %.1f, ...]\n",
-               (float)out0[0], (float)out0[1], (float)out0[2], (float)out0[3]);
+        float *out0 = (float*)IOSurfaceGetBaseAddress(ioOut);
+        float baseline_0 = out0[0], baseline_1 = out0[1];
+        printf("  Output[0..3]: [%.4f, %.4f, %.4f, %.4f]\n", out0[0], out0[1], out0[2], out0[3]);
         IOSurfaceUnlock(ioOut, kIOSurfaceLockReadOnly, NULL);
 
-        // Test weightsBuffer: create IOSurface with weight data
+        // Test weightsBuffer: IOSurface with 3x identity weights
         printf("\n  Testing weightsBuffer IOSurface...\n");
-        _Float16 weights2[16];
-        for (int i = 0; i < 16; i++) weights2[i] = (i/4 == i%4) ? (_Float16)3.0f : (_Float16)0.0f;
-
+        _Float16 *w3 = (_Float16*)calloc(CH*CH, sizeof(_Float16));
+        for (int i = 0; i < CH; i++) w3[i*CH+i] = (_Float16)3.0f;
         IOSurfaceRef ioW = make_surface(ws);
         IOSurfaceLock(ioW, 0, NULL);
-        memcpy(IOSurfaceGetBaseAddress(ioW), weights2, ws);
+        memcpy(IOSurfaceGetBaseAddress(ioW), w3, ws);
         IOSurfaceUnlock(ioW, 0, NULL);
+        free(w3);
         id wW = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(g_AIO, @selector(objectWithIOSurface:), ioW);
 
-        // Try with weightsBuffer
         wI = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(g_AIO, @selector(objectWithIOSurface:), ioIn);
         wO = ((id(*)(Class,SEL,IOSurfaceRef))objc_msgSend)(g_AIO, @selector(objectWithIOSurface:), ioOut);
         id req_wb = ((id(*)(Class,SEL,id,id,id,id,id,id,id))objc_msgSend)(g_AR,
@@ -189,14 +191,16 @@ int main() {
         if (req_wb) {
             ok = ((BOOL(*)(id,SEL,unsigned int,id,id,NSError**))objc_msgSend)(
                 mdl, @selector(evaluateWithQoS:options:request:error:), 21, @{}, req_wb, &e);
-            printf("  Eval with weightsBuffer: %s\n", ok ? "OK" : [[e description] UTF8String]);
+            printf("  Eval with weightsBuffer: %s\n", ok ? "OK" : e ? [[e description] UTF8String] : "FAIL");
             if (ok) {
                 IOSurfaceLock(ioOut, kIOSurfaceLockReadOnly, NULL);
-                _Float16 *outW = (_Float16*)IOSurfaceGetBaseAddress(ioOut);
-                printf("  Output (3x identity via weightsBuffer): [%.1f, %.1f, %.1f, %.1f, ...]\n",
-                       (float)outW[0], (float)outW[1], (float)outW[2], (float)outW[3]);
-                bool is_3x = fabsf((float)outW[0] - 3.0f) < 0.1f;
-                printf("  weightsBuffer override %s\n", is_3x ? "WORKS!" : "does NOT work (output unchanged)");
+                float *outW = (float*)IOSurfaceGetBaseAddress(ioOut);
+                printf("  Output[0..3]: [%.4f, %.4f, %.4f, %.4f]\n", outW[0], outW[1], outW[2], outW[3]);
+                bool changed = fabsf(outW[0] - baseline_0) > 0.001f;
+                bool is_3x = fabsf(outW[0] - baseline_0 * 3.0f) < 0.1f;
+                printf("  weightsBuffer: output %s", changed ? "CHANGED" : "unchanged");
+                if (changed) printf(" (%s)", is_3x ? "matches 3x — WORKS!" : "but not 3x as expected");
+                printf("\n");
                 IOSurfaceUnlock(ioOut, kIOSurfaceLockReadOnly, NULL);
             }
         }
@@ -228,6 +232,7 @@ int main() {
             }
         }
         free(allClasses);
+        free(w);
 
         // Cleanup
         ((BOOL(*)(id,SEL,unsigned int,NSError**))objc_msgSend)(mdl, @selector(unloadWithQoS:error:), 21, &e);
