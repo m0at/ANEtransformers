@@ -1,5 +1,13 @@
 # ANE Training — Backpropagation on Apple Neural Engine
 
+You might be asking, "why the FUCK would you pick GPT2?"
+
+Have you read the art bro? Have you? Nah. I doubt it.
+
+GPT2 had more sole in it's theoretical pinky finger than all of us combined. 
+
+But I digress..
+
 Training neural networks directly on Apple's Neural Engine (ANE) via reverse-engineered private APIs. No CoreML training APIs, no Metal, no GPU — pure ANE compute.
 
 ## What This Is
@@ -109,3 +117,4 @@ This project is independent research into Apple Neural Engine architecture. It u
 ## License
 
 MIT — see [LICENSE](LICENSE)
+
