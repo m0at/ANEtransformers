@@ -30,7 +30,13 @@ probes: $(PROBES)
 tokenize:
 	python3 tokenize.py
 
+bench_fused: bench_fused.m
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+
+gpt2: gpt2.m gpt2_tokenizer.h
+	$(CC) $(CFLAGS) -o $@ gpt2.m $(LDFLAGS) -framework Accelerate
+
 clean:
-	rm -f train train_large $(PROBES)
+	rm -f train train_large $(PROBES) bench_fused gpt2
 
 .PHONY: clean tokenize probes
