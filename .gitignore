@@ -1,0 +1,45 @@
+# Compiled binaries
+mistral/mistral
+mistral/ane_*_test
+mistral/ane_benchmark
+mistral/ane_prefill_compare
+mistral/transpose_test
+mistral/reload_probe
+mistral/direct_load_probe
+mistral/ane_system_model_test
+mistral/bench_gemm
+tests/test_mistral
+tests/transpose_test
+quant_probe
+w8a8_probe
+ane_blob_cache_probe
+ane_cache_probe
+ane_cache2
+
+# Claude worktrees
+.claude/worktrees/
+
+# Rust build artifacts
+chat/target/
+
+# Build artifacts
+*.o
+*.dSYM/
+*.metallib
+
+# macOS
+.DS_Store
+
+# Models (large files)
+*.gguf
+*.bin
+*.safetensors
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor
+*.swp
+*.swo
+*~

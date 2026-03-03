@@ -1,0 +1,12 @@
+[package]
+name = "mistral-chat"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+dirs = "6"
+
+[profile.release]
+opt-level = 2
+strip = true
